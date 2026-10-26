@@ -1,0 +1,46 @@
+'use server';
+
+import { act, numOrNull, str, strOrNull, UserError } from '@/lib/actions';
+import { anonClient } from '@/lib/public-data';
+import type { ActionResult } from '@/lib/types';
+
+/**
+ * Visitor forms on the company website. They run with the anonymous key, and the database
+ * function submit_application validate everything again and notify the team.
+ */
+const isBot = (fd: FormData) => str(fd, 'website') !== ''; // honeypot field — hidden from people
+
+/** PDPL: the request is processed only with explicit consent; it is logged against the new reference */
+async function logConsent(ref: string, base: string[], fd: FormData) {
+  const purposes = ['privacy_policy', ...base, ...(fd.get('consent_marketing') === 'on' ? ['marketing'] : [])];
+  await anonClient().rpc('log_form_consent', { p_ref: ref, p_purposes: purposes });
+}
+
+export async function submitApplication(_: ActionResult, fd: FormData): Promise<ActionResult> {
+  return act(async (d) => {
+    if (isBot(fd)) return { ok: true, data: { ref: '—' } };
+    if (!str(fd, 'full_name') || !str(fd, 'phone') || !str(fd, 'email')) throw new UserError(d.errors.REQUIRED);
+    if (fd.get('consent_privacy') !== 'on') throw new UserError(d.privacy.consentRequired);
+    const linkedin = strOrNull(fd, 'linkedin_url');
+    const { data, error } = await anonClient().rpc('submit_application', {
+      p_kind: str(fd, 'kind') === 'training' ? 'training' : 'job',
+      p_name: str(fd, 'full_name'),
+      p_phone: str(fd, 'phone'),
+      p_email: str(fd, 'email'),
+      p_opening: strOrNull(fd, 'opening_id'),
+      p_city: strOrNull(fd, 'city'),
+      p_education: strOrNull(fd, 'education'),
+      p_major: strOrNull(fd, 'major'),
+      p_university: strOrNull(fd, 'university'),
+      p_experience: numOrNull(fd, 'experience_years'),
+      p_linkedin: linkedin && /^https:\/\//i.test(linkedin) ? linkedin : null,
+      p_cv_path: strOrNull(fd, 'cv_path'),
+      p_note: strOrNull(fd, 'cover_note'),
+      p_training_from: strOrNull(fd, 'training_from'),
+      p_training_to: strOrNull(fd, 'training_to'),
+    });
+    if (error) throw new Error(error.message);
+    await logConsent(data as string, ['cv_processing'], fd);
+    return { ok: true, data: { ref: data as string } };
+  });
+}
